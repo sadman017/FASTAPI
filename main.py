@@ -1,15 +1,23 @@
 """
 Malaysian Scraper API — FastAPI Entrypoint
 
-Provides two public endpoints:
+Provides public endpoints:
   GET /api/nutrition?food_name=...   -> Scrape food nutrition from MyFCD
   GET /api/halal?product_name=...    -> Scrape halal certification from JAKIM MyeHalal
+  GET /api/nutrition/search?query=...-> Search foods via FatSecret REST API
+  POST /api/food-log                -> Log food consumption
+  GET  /api/food-log/daily          -> Daily food log + macro summary
+  GET  /api/food-log/weekly         -> Weekly food log + macro ratios
+  GET  /api/food-log/monthly        -> Monthly food log + macro ratios
+  GET  /api/food-log/yearly         -> Yearly food log + macro ratios
 
 Features:
   - Rate limiting (10 requests/minute per IP)
   - CORS enabled
   - Structured error handling
   - Async scraping with Playwright stealth fallback
+  - FatSecret OAuth 2.0 integration with token caching
+  - SQLite food logging with SQLAlchemy
   - Logging
 
 Run locally:
@@ -30,6 +38,9 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from scrapers import MyFCDScraper, JakimHalalScraper
+from database import engine
+from models import Base
+from routers import nutrition, food_log
 
 # ---------------------------------------------------------------------------
 # LOGGING CONFIGURATION
@@ -54,6 +65,9 @@ limiter = Limiter(key_func=get_remote_address)
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     logger.info("🚀 Malaysian Scraper API starting up...")
+    # Create SQLite tables on startup
+    Base.metadata.create_all(bind=engine)
+    logger.info("📦 Database tables ensured.")
     yield
     logger.info("🛑 Malaysian Scraper API shutting down...")
 
@@ -86,6 +100,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# NEW ROUTERS (FatSecret + Food Log)
+# ---------------------------------------------------------------------------
+app.include_router(nutrition.router)
+app.include_router(food_log.router)
 
 # ---------------------------------------------------------------------------
 # GLOBAL EXCEPTION HANDLER
@@ -245,8 +265,17 @@ async def root():
         "message": "Malaysian Scraper API is running.",
         "docs": "/docs",
         "endpoints": {
-            "nutrition": "/api/nutrition?food_name=<name>",
+            "myfcd_nutrition": "/api/nutrition?food_name=<name>",
             "halal": "/api/halal?product_name=<name>",
+            "fatsecret_search": "/api/nutrition/search?query=<name>",
+            "food_log": {
+                "create": "POST /api/food-log",
+                "daily": "GET /api/food-log/daily?user_id=<uid>&log_date=<date>",
+                "weekly": "GET /api/food-log/weekly?user_id=<uid>&start_date=<date>",
+                "monthly": "GET /api/food-log/monthly?user_id=<uid>&year=<y>&month=<m>",
+                "yearly": "GET /api/food-log/yearly?user_id=<uid>&year=<y>",
+                "delete": "DELETE /api/food-log/<id>",
+            },
         },
     }
 
