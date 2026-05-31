@@ -20,7 +20,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 # Playwright imports (stealth mode for bot protection bypass)
 from playwright.async_api import async_playwright, Page, Browser
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth
 
 logger = logging.getLogger(__name__)
 
