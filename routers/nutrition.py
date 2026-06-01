@@ -79,8 +79,52 @@ def _parse_fatsecret_description(description: str) -> Dict[str, Any]:
     return result
 
 
+def _extract_fatsecret_foods(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract food list from either v1 or v2 FatSecret response."""
+    # Try v2 structure first
+    foods_data = data.get("foods_search", {}).get("results", {}).get("food", [])
+    if foods_data is None:
+        foods_data = []
+    if isinstance(foods_data, dict):
+        foods_data = [foods_data]
+    if foods_data:
+        return foods_data
+
+    # Fall back to v1 structure
+    foods_data = data.get("foods", {}).get("food", [])
+    if foods_data is None:
+        foods_data = []
+    if isinstance(foods_data, dict):
+        foods_data = [foods_data]
+    return foods_data
+
+
+async def _call_fatsecret_search(
+    client: httpx.AsyncClient,
+    token: str,
+    query: str,
+    method: str,
+) -> Dict[str, Any]:
+    """Call FatSecret search and return parsed JSON."""
+    resp = await client.get(
+        FATSECRET_API_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "method": method,
+            "search_expression": query,
+            "format": "json",
+            "max_results": 10,
+        },
+    )
+    logger.info("[FatSecret] %s HTTP %s for query '%s'", method, resp.status_code, query)
+    if resp.status_code >= 400:
+        logger.error("[FatSecret] %s error body: %s", method, resp.text[:500])
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _search_fatsecret(query: str) -> List[Dict[str, Any]]:
-    """Search FatSecret foods.search.v2 and return structured results."""
+    """Search FatSecret. Tries Premier v2 first, falls back to v1."""
     try:
         token = await get_access_token()
     except Exception as exc:
@@ -89,21 +133,17 @@ async def _search_fatsecret(query: str) -> List[Dict[str, Any]]:
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                FATSECRET_API_URL,
-                params={
-                    "method": "foods.search.v2",
-                    "search_expression": query,
-                    "format": "json",
-                    "max_results": 10,
-                    "access_token": token,
-                },
-            )
-            logger.info("[FatSecret] HTTP %s for query '%s'", resp.status_code, query)
-            if resp.status_code >= 400:
-                logger.error("[FatSecret] Error body: %s", resp.text[:500])
-            resp.raise_for_status()
-            data = resp.json()
+            # Try Premier v2 first
+            data = await _call_fatsecret_search(client, token, query, "foods.search.v2")
+
+            # Check if v2 returned an error (e.g., premier scope missing)
+            if "error" in data:
+                logger.warning(
+                    "[FatSecret] v2 error code %s: %s. Falling back to v1.",
+                    data["error"].get("code"),
+                    data["error"].get("message"),
+                )
+                data = await _call_fatsecret_search(client, token, query, "foods.search")
     except httpx.HTTPStatusError as exc:
         logger.error("FatSecret HTTP error: %s", exc)
         return []
@@ -112,13 +152,7 @@ async def _search_fatsecret(query: str) -> List[Dict[str, Any]]:
         return []
 
     results: List[Dict[str, Any]] = []
-
-    # FatSecret nests results differently depending on count
-    foods_data = data.get("foods_search", {}).get("results", {}).get("food", [])
-    if foods_data is None:
-        foods_data = []
-    if isinstance(foods_data, dict):
-        foods_data = [foods_data]
+    foods_data = _extract_fatsecret_foods(data)
 
     for food in foods_data:
         parsed = _parse_fatsecret_description(food.get("food_description", ""))
@@ -150,6 +184,7 @@ async def _search_openfoodfacts(query: str) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 OFF_SEARCH_URL,
+                headers={"User-Agent": "SmartBiteApp/1.0 (contact@smartbite.app)"},
                 params={
                     "search_terms": query,
                     "search_simple": 1,
@@ -256,11 +291,11 @@ async def get_fatsecret_food(food_id: str):
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
                 params={
                     "method": "food.get",
                     "food_id": food_id,
                     "format": "json",
-                    "access_token": token,
                 },
             )
             logger.info("[FatSecret] detail HTTP %s for food_id %s", resp.status_code, food_id)
