@@ -91,14 +91,17 @@ async def _search_fatsecret(query: str) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 FATSECRET_API_URL,
-                headers={"Authorization": f"Bearer {token}"},
                 params={
                     "method": "foods.search.v2",
                     "search_expression": query,
                     "format": "json",
                     "max_results": 10,
+                    "access_token": token,
                 },
             )
+            logger.info("[FatSecret] HTTP %s for query '%s'", resp.status_code, query)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] Error body: %s", resp.text[:500])
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPStatusError as exc:
@@ -253,13 +256,16 @@ async def get_fatsecret_food(food_id: str):
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 FATSECRET_API_URL,
-                headers={"Authorization": f"Bearer {token}"},
                 params={
                     "method": "food.get",
                     "food_id": food_id,
                     "format": "json",
+                    "access_token": token,
                 },
             )
+            logger.info("[FatSecret] detail HTTP %s for food_id %s", resp.status_code, food_id)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] detail error body: %s", resp.text[:500])
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPStatusError as exc:
