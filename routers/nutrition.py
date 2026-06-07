@@ -347,3 +347,294 @@ async def get_fatsecret_food(food_id: str):
         "food_name": food.get("food_name") or "Unknown",
         "servings": servings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers for new endpoints
+# ---------------------------------------------------------------------------
+
+
+def _format_gtin13(code: str) -> str:
+    """Strip non-digits and zero-pad to GTIN-13 (13 digits)."""
+    digits = re.sub(r"\D", "", code)
+    return digits.zfill(13)
+
+
+def _parse_fatsecret_food_detail(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a FatSecret food.get or food.find_id_for_barcode.v2 response into unified shape."""
+    food = data.get("food", {})
+    if not food:
+        return {}
+
+    servings_raw = food.get("servings", {}).get("serving", [])
+    if servings_raw is None:
+        servings_raw = []
+    if isinstance(servings_raw, dict):
+        servings_raw = [servings_raw]
+
+    servings = []
+    for s in servings_raw:
+        servings.append({
+            "serving_id": str(s.get("serving_id", "")),
+            "serving_description": s.get("serving_description", "serving"),
+            "calories": float(s.get("calories", 0) or 0),
+            "protein": float(s.get("protein", 0) or 0),
+            "carbs": float(s.get("carbohydrate", 0) or 0),
+            "fat": float(s.get("fat", 0) or 0),
+        })
+
+    # Parse allergens if present (v2 barcode / food.get)
+    allergens = []
+    attrs = food.get("food_attributes", {})
+    allergens_data = attrs.get("allergens", {}).get("allergen", []) if isinstance(attrs, dict) else []
+    if allergens_data:
+        if isinstance(allergens_data, dict):
+            allergens_data = [allergens_data]
+        for a in allergens_data:
+            allergens.append({
+                "id": str(a.get("id", "")),
+                "name": a.get("name", ""),
+                "value": a.get("value", ""),
+            })
+
+    first_serving = servings[0] if servings else {}
+    return {
+        "food_id": str(food.get("food_id", "")),
+        "food_name": food.get("food_name") or "Unknown",
+        "brand_name": food.get("brand_name", ""),
+        "food_type": food.get("food_type", ""),
+        "calories": float(first_serving.get("calories", 0) or 0),
+        "protein": float(first_serving.get("protein", 0) or 0),
+        "carbs": float(first_serving.get("carbs", 0) or 0),
+        "fat": float(first_serving.get("fat", 0) or 0),
+        "serving_description": first_serving.get("serving_description", "per serving"),
+        "servings": servings,
+        "allergens": allergens,
+        "source": "fatsecret",
+    }
+
+
+# ---------------------------------------------------------------------------
+# FatSecret barcode lookup endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/nutrition/barcode", tags=["Nutrition"])
+async def lookup_barcode(code: str = Query(..., min_length=1, description="Barcode value (any format)")):
+    """
+    Lookup a food by barcode via FatSecret.
+    Tries Premier v2 first, falls back to v1 + food.get.
+    Returns unified food detail with servings and allergens.
+    """
+    gtin = _format_gtin13(code)
+    logger.info("[FatSecret] Barcode lookup for raw='%s' gtin='%s'", code, gtin)
+
+    try:
+        token = await get_access_token()
+    except Exception as exc:
+        logger.error("FatSecret token fetch failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to authenticate with FatSecret.",
+        )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # --- Try v2 first (Premier, returns full food details) ---
+        try:
+            resp = await client.get(
+                FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "method": "food.find_id_for_barcode.v2",
+                    "barcode": gtin,
+                    "format": "json",
+                },
+            )
+            logger.info("[FatSecret] barcode v2 HTTP %s for gtin %s", resp.status_code, gtin)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] barcode v2 error body: %s", resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "error" not in data and data.get("food"):
+                parsed = _parse_fatsecret_food_detail(data)
+                if parsed:
+                    logger.info("[FatSecret] Barcode v2 hit for gtin %s -> %s", gtin, parsed["food_name"])
+                    return {"success": True, **parsed}
+        except Exception as exc:
+            logger.warning("[FatSecret] Barcode v2 failed for gtin %s: %s", gtin, exc)
+
+        # --- Fallback to v1 (returns food_id only) ---
+        try:
+            resp = await client.get(
+                FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "method": "food.find_id_for_barcode",
+                    "barcode": gtin,
+                    "format": "json",
+                },
+            )
+            logger.info("[FatSecret] barcode v1 HTTP %s for gtin %s", resp.status_code, gtin)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] barcode v1 error body: %s", resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "error" in data:
+                logger.warning("[FatSecret] Barcode v1 error for gtin %s: %s", gtin, data.get("error"))
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Barcode {gtin} not found in FatSecret.",
+                )
+
+            food_id = data.get("food_id")
+            if not food_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Barcode {gtin} not found in FatSecret.",
+                )
+
+            # Fetch full details via food.get
+            detail_resp = await client.get(
+                FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "method": "food.get",
+                    "food_id": str(food_id),
+                    "format": "json",
+                },
+            )
+            detail_resp.raise_for_status()
+            detail_data = detail_resp.json()
+            parsed = _parse_fatsecret_food_detail(detail_data)
+            if parsed:
+                logger.info("[FatSecret] Barcode v1 hit for gtin %s -> food_id %s -> %s", gtin, food_id, parsed["food_name"])
+                return {"success": True, **parsed}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("[FatSecret] Barcode v1 failed for gtin %s: %s", gtin, exc)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Barcode {gtin} not found in FatSecret.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# FatSecret auto-complete endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/nutrition/autocomplete", tags=["Nutrition"])
+async def autocomplete_foods(
+    query: str = Query(..., min_length=1, description="Partial food name to get suggestions for")
+):
+    """
+    Return auto-complete suggestions from FatSecret Premier.
+    """
+    try:
+        token = await get_access_token()
+    except Exception as exc:
+        logger.error("FatSecret token fetch failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to authenticate with FatSecret.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "method": "foods.autocomplete.v2",
+                    "expression": query,
+                    "format": "json",
+                },
+            )
+            logger.info("[FatSecret] autocomplete HTTP %s for '%s'", resp.status_code, query)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] autocomplete error body: %s", resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.error("FatSecret autocomplete failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="FatSecret autocomplete temporarily unavailable.",
+        )
+
+    if "error" in data:
+        logger.warning("[FatSecret] autocomplete error: %s", data.get("error"))
+        return {"success": True, "suggestions": []}
+
+    suggestions_data = data.get("suggestions", {}).get("suggestion", [])
+    if suggestions_data is None:
+        suggestions_data = []
+    if isinstance(suggestions_data, str):
+        suggestions_data = [suggestions_data]
+
+    return {"success": True, "suggestions": suggestions_data}
+
+
+# ---------------------------------------------------------------------------
+# FatSecret food categories endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/nutrition/categories", tags=["Nutrition"])
+async def get_food_categories():
+    """
+    Return FatSecret food categories list.
+    """
+    try:
+        token = await get_access_token()
+    except Exception as exc:
+        logger.error("FatSecret token fetch failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to authenticate with FatSecret.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                FATSECRET_API_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "method": "food_categories.get",
+                    "format": "json",
+                },
+            )
+            logger.info("[FatSecret] categories HTTP %s", resp.status_code)
+            if resp.status_code >= 400:
+                logger.error("[FatSecret] categories error body: %s", resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.error("FatSecret categories failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="FatSecret categories temporarily unavailable.",
+        )
+
+    if "error" in data:
+        logger.warning("[FatSecret] categories error: %s", data.get("error"))
+        return {"success": True, "categories": []}
+
+    categories_raw = data.get("categories", {}).get("category", [])
+    if categories_raw is None:
+        categories_raw = []
+    if isinstance(categories_raw, dict):
+        categories_raw = [categories_raw]
+
+    categories = []
+    for cat in categories_raw:
+        categories.append({
+            "id": str(cat.get("food_category_id", "")),
+            "name": cat.get("food_category_name", ""),
+        })
+
+    return {"success": True, "categories": categories}

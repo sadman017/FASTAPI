@@ -106,6 +106,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(nutrition.router)
 app.include_router(food_log.router)
+app.include_router(ai.router)
 
 # ---------------------------------------------------------------------------
 # GLOBAL EXCEPTION HANDLER
