@@ -40,7 +40,7 @@ from slowapi.errors import RateLimitExceeded
 from scrapers import MyFCDScraper, JakimHalalScraper
 from database import engine
 from models import Base
-from routers import nutrition, food_log
+from routers import nutrition, food_log, ai
 
 # ---------------------------------------------------------------------------
 # LOGGING CONFIGURATION
