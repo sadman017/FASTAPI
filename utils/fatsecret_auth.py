@@ -45,7 +45,7 @@ async def get_access_token() -> str:
             TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
-                "scope": "basic barcode premier nlp image_recognition",
+                # Omit scope to get all scopes the account has access to
             },
             auth=(FATSECRET_CLIENT_ID, FATSECRET_CLIENT_SECRET),
         )
@@ -55,5 +55,6 @@ async def get_access_token() -> str:
     _token_cache["access_token"] = data["access_token"]
     expires_in = data.get("expires_in", 86400)
     _token_cache["expires_at"] = now + timedelta(seconds=expires_in)
-    logger.info("[FatSecret] Token cached, expires in %s seconds", expires_in)
+    granted_scope = data.get("scope", "")
+    logger.info("[FatSecret] Token cached, expires in %s seconds, scopes: %s", expires_in, granted_scope)
     return _token_cache["access_token"]
