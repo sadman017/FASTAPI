@@ -156,6 +156,31 @@ async def _search_fatsecret(query: str) -> List[Dict[str, Any]]:
 
     for food in foods_data:
         parsed = _parse_fatsecret_description(food.get("food_description", ""))
+
+        # Fallback: if food_description parsing yielded all zeros, try direct v2 fields
+        if parsed["calories"] == 0 and parsed["protein"] == 0 and parsed["carbs"] == 0 and parsed["fat"] == 0:
+            parsed["calories"] = float(food.get("calories", 0) or 0)
+            parsed["protein"] = float(food.get("protein", 0) or 0)
+            parsed["carbs"] = float(food.get("carbohydrate", 0) or 0)
+            parsed["fat"] = float(food.get("fat", 0) or 0)
+            if not parsed["serving_description"] or parsed["serving_description"] == "per serving":
+                parsed["serving_description"] = food.get("serving_description") or "per serving"
+
+        # Second fallback: try first serving if still zeros
+        if parsed["calories"] == 0 and parsed["protein"] == 0 and parsed["carbs"] == 0 and parsed["fat"] == 0:
+            servings_raw = food.get("servings", {}).get("serving", [])
+            if servings_raw is None:
+                servings_raw = []
+            if isinstance(servings_raw, dict):
+                servings_raw = [servings_raw]
+            if servings_raw:
+                first = servings_raw[0]
+                parsed["calories"] = float(first.get("calories", 0) or 0)
+                parsed["protein"] = float(first.get("protein", 0) or 0)
+                parsed["carbs"] = float(first.get("carbohydrate", 0) or 0)
+                parsed["fat"] = float(first.get("fat", 0) or 0)
+                parsed["serving_description"] = first.get("serving_description") or "per serving"
+
         results.append({
             "food_id": str(food.get("food_id", "")),
             "food_name": food.get("food_name") or "Unknown Food",

@@ -33,10 +33,7 @@ def _normalize_ai_food(raw: Dict[str, Any], source: str) -> Dict[str, Any]:
     nutrition = eaten.get("total_nutritional_content") or {}
     serving = raw.get("suggested_serving") or {}
 
-    logger.debug("[AI] normalize input keys: %s, eaten keys: %s, nutrition keys: %s",
-                 list(raw.keys()), list(eaten.keys()), list(nutrition.keys()))
-
-    result = {
+    return {
         "food_id": str(raw.get("food_id", "")),
         "food_name": raw.get("food_entry_name") or raw.get("food_name") or "Unknown Food",
         "calories": float(nutrition.get("calories", 0) or raw.get("calories", 0) or 0),
@@ -47,8 +44,6 @@ def _normalize_ai_food(raw: Dict[str, Any], source: str) -> Dict[str, Any]:
         "confidence": float(raw.get("confidence", 0) or 0),
         "source": source,
     }
-    logger.debug("[AI] normalize output: %s", result)
-    return result
 
 
 # ---------------------------------------------------------------------------
