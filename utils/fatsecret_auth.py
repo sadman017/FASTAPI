@@ -45,7 +45,7 @@ async def get_access_token() -> str:
             TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
-                "scope": "basic barcode premier",
+                "scope": "basic barcode premier nlp image_recognition",
             },
             auth=(FATSECRET_CLIENT_ID, FATSECRET_CLIENT_SECRET),
         )
