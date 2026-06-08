@@ -24,15 +24,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _normalize_ai_food(raw: Dict[str, Any], source: str) -> Dict[str, Any]:
-    """Convert a raw FatSecret AI response item into the app's standard schema."""
+    """Convert a raw FatSecret AI response item into the app's standard schema.
+
+    Handles both the nested 'food_response' structure from AI endpoints
+    and the flatter structure from other endpoints.
+    """
+    eaten = raw.get("eaten") or {}
+    nutrition = eaten.get("total_nutritional_content") or {}
+    serving = raw.get("suggested_serving") or {}
+
     return {
         "food_id": str(raw.get("food_id", "")),
-        "food_name": raw.get("food_name") or "Unknown Food",
-        "calories": float(raw.get("calories", 0) or 0),
-        "protein": float(raw.get("protein", 0) or 0),
-        "carbs": float(raw.get("carbs", 0) or 0),
-        "fat": float(raw.get("fat", 0) or 0),
-        "serving_description": raw.get("serving_description") or "per serving",
+        "food_name": raw.get("food_entry_name") or raw.get("food_name") or "Unknown Food",
+        "calories": float(nutrition.get("calories", 0) or raw.get("calories", 0) or 0),
+        "protein": float(nutrition.get("protein", 0) or raw.get("protein", 0) or 0),
+        "carbs": float(nutrition.get("carbohydrate", 0) or raw.get("carbs", 0) or 0),
+        "fat": float(nutrition.get("fat", 0) or raw.get("fat", 0) or 0),
+        "serving_description": serving.get("serving_description") or raw.get("serving_description") or "per serving",
         "confidence": float(raw.get("confidence", 0) or 0),
         "source": source,
     }
@@ -94,7 +102,7 @@ async def image_recognize(
             response=httpx.Response(status_code=503),
         )
 
-    foods_raw = data.get("foods") or data.get("results") or []
+    foods_raw = data.get("food_response") or data.get("foods") or data.get("results") or []
     if isinstance(foods_raw, dict):
         foods_raw = [foods_raw]
     return [_normalize_ai_food(item, "ai_image") for item in foods_raw]
@@ -156,7 +164,7 @@ async def nlp_parse(
             response=httpx.Response(status_code=503),
         )
 
-    foods_raw = data.get("foods") or data.get("results") or []
+    foods_raw = data.get("food_response") or data.get("foods") or data.get("results") or []
     if isinstance(foods_raw, dict):
         foods_raw = [foods_raw]
     return [_normalize_ai_food(item, "ai_nlp") for item in foods_raw]
