@@ -79,20 +79,20 @@ async def image_recognize(
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
-                "https://platform.fatsecret.com/rest/image/recognition/v1",
+                "https://platform.fatsecret.com/rest/image-recognition/v1",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
             )
-            logger.info("[FatSecret AI] image/recognition HTTP %s", resp.status_code)
+            logger.info("[FatSecret AI] image-recognition HTTP %s", resp.status_code)
             if resp.status_code >= 400:
-                logger.error("[FatSecret AI] image/recognition error: %s", resp.text[:500])
+                logger.error("[FatSecret AI] image-recognition error: %s", resp.text[:500])
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPStatusError as exc:
-        logger.error("[FatSecret AI] image/recognize HTTP error: %s", exc)
+        logger.error("[FatSecret AI] image-recognize HTTP error: %s", exc)
         raise
     except Exception as exc:
         logger.error("[FatSecret AI] image/recognize failed: %s", exc)

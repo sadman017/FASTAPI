@@ -385,6 +385,100 @@ def _format_gtin13(code: str) -> str:
     return digits.zfill(13)
 
 
+OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
+
+
+async def _lookup_openfoodfacts_barcode(code: str) -> Dict[str, Any]:
+    """
+    Lookup a product by barcode via OpenFoodFacts.
+    Returns a unified food-detail dict (same shape as the FatSecret parser),
+    or an empty dict when the product is not found / has no usable nutrition.
+    """
+    digits = re.sub(r"\D", "", code)
+    # OpenFoodFacts is keyed on the raw EAN/UPC; try the digits as-is first.
+    candidates = [digits, digits.zfill(13)]
+    tried = set()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for barcode in candidates:
+                if not barcode or barcode in tried:
+                    continue
+                tried.add(barcode)
+                resp = await client.get(
+                    OFF_PRODUCT_URL.format(barcode=barcode),
+                    headers={"User-Agent": "SmartBiteApp/1.0 (contact@smartbite.app)"},
+                    params={
+                        "fields": "code,product_name,product_name_en,brands,"
+                        "nutriments,serving_size,ingredients_text,additives_tags,allergens_tags",
+                    },
+                )
+                logger.info("[OpenFoodFacts] barcode %s HTTP %s", barcode, resp.status_code)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if data.get("status") != 1:
+                    continue
+
+                product = data.get("product", {}) or {}
+                nutriments = product.get("nutriments", {}) or {}
+
+                calories = float(
+                    nutriments.get("energy-kcal_100g", nutriments.get("energy-kcal", 0)) or 0
+                )
+                protein = float(nutriments.get("proteins_100g", nutriments.get("proteins", 0)) or 0)
+                carbs = float(
+                    nutriments.get("carbohydrates_100g", nutriments.get("carbohydrates", 0)) or 0
+                )
+                fat = float(nutriments.get("fat_100g", nutriments.get("fat", 0)) or 0)
+
+                # Skip products with no usable macro data so FatSecret can take over.
+                if calories == 0 and protein == 0 and carbs == 0 and fat == 0:
+                    logger.info("[OpenFoodFacts] barcode %s has no nutrition, skipping", barcode)
+                    continue
+
+                food_name = (
+                    product.get("product_name")
+                    or product.get("product_name_en")
+                    or "Unknown Product"
+                )
+
+                serving = {
+                    "serving_id": "off_100g",
+                    "serving_description": "per 100g",
+                    "calories": calories,
+                    "protein": protein,
+                    "carbs": carbs,
+                    "fat": fat,
+                }
+
+                allergens = []
+                for tag in product.get("allergens_tags", []) or []:
+                    name = tag.split(":")[-1].replace("-", " ").strip()
+                    if name:
+                        allergens.append({"id": tag, "name": name, "value": ""})
+
+                logger.info("[OpenFoodFacts] Barcode hit for %s -> %s", barcode, food_name)
+                return {
+                    "food_id": product.get("code", barcode),
+                    "food_name": food_name,
+                    "brand_name": product.get("brands", "") or "",
+                    "food_type": "",
+                    "calories": calories,
+                    "protein": protein,
+                    "carbs": carbs,
+                    "fat": fat,
+                    "serving_description": "per 100g",
+                    "servings": [serving],
+                    "allergens": allergens,
+                    "source": "openfoodfacts",
+                }
+    except Exception as exc:
+        logger.warning("[OpenFoodFacts] barcode lookup failed for %s: %s", code, exc)
+
+    return {}
+
+
 def _parse_fatsecret_food_detail(data: Dict[str, Any]) -> Dict[str, Any]:
     """Parse a FatSecret food.get or food.find_id_for_barcode.v2 response into unified shape."""
     food = data.get("food", {})
@@ -447,20 +541,33 @@ def _parse_fatsecret_food_detail(data: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/api/nutrition/barcode", tags=["Nutrition"])
 async def lookup_barcode(code: str = Query(..., min_length=1, description="Barcode value (any format)")):
     """
-    Lookup a food by barcode via FatSecret.
-    Tries Premier v2 first, falls back to v1 + food.get.
+    Lookup a food by barcode.
+
+    Resolution order:
+      1. OpenFoodFacts (primary) — community packaged-product database.
+      2. FatSecret (fallback) — Premier v2, then v1 + food.get.
+
     Returns unified food detail with servings and allergens.
     """
     gtin = _format_gtin13(code)
-    logger.info("[FatSecret] Barcode lookup for raw='%s' gtin='%s'", code, gtin)
+    logger.info("[Barcode] Lookup for raw='%s' gtin='%s'", code, gtin)
 
+    # --- 1. Try OpenFoodFacts first ---
+    off_result = await _lookup_openfoodfacts_barcode(code)
+    if off_result:
+        logger.info("[Barcode] OpenFoodFacts hit for '%s' -> %s", code, off_result["food_name"])
+        return {"success": True, **off_result}
+
+    logger.info("[Barcode] OpenFoodFacts miss for '%s', falling back to FatSecret", code)
+
+    # --- 2. Fall back to FatSecret ---
     try:
         token = await get_access_token()
     except Exception as exc:
         logger.error("FatSecret token fetch failed: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to authenticate with FatSecret.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Barcode {gtin} not found.",
         )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
